@@ -11,6 +11,41 @@ import { generateTests } from '../generators/index'
 import { readFileAtRef, repoRelative } from '../git/refs'
 import { printReport, type PromptReport } from '../report/tty'
 import { INIT_CONFIG, INIT_PROMPT, INIT_TESTS } from './scaffold'
+import { scanRepo } from '../discover/scan'
+import { refineCandidates, hasAnyKey } from '../discover/agent'
+import { stringify } from 'yaml'
+
+const DEFAULT_MODEL = 'google:gemini-2.5-flash'
+
+interface Found {
+  id: string
+  file: string
+  source: 'file' | 'embedded'
+  text: string
+  outputKind: 'text' | 'structured'
+  intent: string
+  confidence: number
+}
+
+// Heuristic scan gathers candidates; an AI agent then confirms and names them
+// when a key is present and the user hasn't opted out with --no-ai.
+async function discover(flags: Record<string, string>): Promise<{ items: Found[]; usedAI: boolean }> {
+  const candidates = scanRepo(process.cwd())
+  if (!candidates.length) return { items: [], usedAI: false }
+
+  if (flags['no-ai'] === 'true' || !hasAnyKey()) {
+    return {
+      items: candidates.map(c => ({ id: c.id, file: c.file, source: c.source, text: c.text, outputKind: c.outputKind, intent: '', confidence: c.confidence })),
+      usedAI: false,
+    }
+  }
+
+  const refined = await refineCandidates({ candidates, modelId: flags.model ?? DEFAULT_MODEL })
+  return {
+    items: refined.map(r => ({ id: r.id, file: r.candidate.file, source: r.candidate.source, text: r.candidate.text, outputKind: r.outputKind, intent: r.intent, confidence: r.candidate.confidence })),
+    usedAI: true,
+  }
+}
 
 async function main() {
   const [command, ...rest] = process.argv.slice(2)
@@ -18,20 +53,71 @@ async function main() {
   const configPath = flags.config ?? 'mowa.eval.yml'
 
   switch (command) {
-    case 'init': return cmdInit()
+    case 'scan': return cmdScan(flags)
+    case 'init': return cmdInit(flags)
     case 'generate': return cmdGenerate(configPath, positional[0])
     case 'eval': case undefined: return cmdEval(configPath, positional[0], flags.base)
     default:
-      console.error(`Unknown command "${command}". Try: init · generate · eval`)
+      console.error(`Unknown command "${command}". Try: scan · init · generate · eval`)
       process.exit(2)
   }
 }
 
-function cmdInit() {
-  write('mowa.eval.yml', INIT_CONFIG)
-  write('prompts/recipe.md', INIT_PROMPT)
-  write('tests/recipe.jsonl', INIT_TESTS)
-  console.log(pc.green('\nReady.'), 'Set GOOGLE_API_KEY, then run', pc.bold('mowa eval'))
+async function cmdScan(flags: Record<string, string>) {
+  const { items, usedAI } = await discover(flags)
+  if (!items.length) {
+    console.log('No prompts found. They live in .md/.txt/.prompt files, or in string literals named like a prompt (PROMPT, system, …).')
+    return
+  }
+  console.log(`Found ${pc.bold(String(items.length))} prompt${items.length === 1 ? '' : 's'}${usedAI ? pc.dim(' (AI-reviewed)') : ''}:\n`)
+  for (const c of items) {
+    console.log(`  ${pc.bold(c.id)}  ${pc.dim(`${c.file} · ${c.source}`)}`)
+    console.log(pc.dim(`    ${c.intent || c.text.replace(/\s+/g, ' ').trim().slice(0, 90) + '…'}`))
+  }
+  if (!usedAI) console.log(pc.dim('\nSet an API key for AI-reviewed discovery (or pass --no-ai to keep it heuristic).'))
+  console.log(pc.dim('Run `mowa init` to scaffold a config from these.'))
+}
+
+async function cmdInit(flags: Record<string, string>) {
+  const { items, usedAI } = flags.sample === 'true' ? { items: [] as Found[], usedAI: false } : await discover(flags)
+  if (!items.length) {
+    write('mowa.eval.yml', INIT_CONFIG)
+    write('prompts/recipe.md', INIT_PROMPT)
+    write('tests/recipe.jsonl', INIT_TESTS)
+    console.log(pc.dim('\nNo existing prompts found — scaffolded a sample.'))
+    console.log(pc.green('Ready.'), 'Set GOOGLE_API_KEY, then run', pc.bold('mowa eval'))
+    return
+  }
+
+  console.log(`Found ${pc.bold(String(items.length))} prompt${items.length === 1 ? '' : 's'}${usedAI ? pc.dim(' (AI-reviewed)') : ''} in your repo.`)
+  const top = items.slice(0, 25)
+  const config = {
+    version: 1,
+    standard: '2.0',
+    defaults: { reference_model: DEFAULT_MODEL, judge: DEFAULT_MODEL },
+    prompts: top.map(configEntry),
+  }
+  write('mowa.eval.yml', stringify(config))
+  for (const c of top) {
+    // Embedded prompts get lifted into a file so they can be versioned and graded.
+    if (c.source === 'embedded') write(`prompts/${c.id}.md`, c.text.trim() + '\n')
+  }
+  console.log(pc.green('\nReady.'), 'Next: set an API key, then')
+  console.log(pc.dim('  mowa generate   # write test cases for each prompt'))
+  console.log(pc.dim('  mowa eval       # score them'))
+  if (!usedAI) console.log(pc.dim('Fill in each contract\'s intent in mowa.eval.yml (set a key to have the agent infer them).'))
+}
+
+function configEntry(c: Found) {
+  const output: Record<string, unknown> = { kind: c.outputKind, description: '' }
+  if (c.outputKind === 'structured') output.jsonSchema = { type: 'object', properties: {} }
+  return {
+    id: c.id,
+    file: c.source === 'embedded' ? `prompts/${c.id}.md` : c.file,
+    tests: `tests/${c.id}.jsonl`,
+    contract: { intent: c.intent, input: { type: 'text', description: '' }, output },
+    threshold: { min: 70, max_regression: 8 },
+  }
 }
 
 async function cmdGenerate(configPath: string, id?: string) {
