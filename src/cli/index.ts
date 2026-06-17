@@ -53,15 +53,47 @@ async function main() {
   const { positional, flags } = parseArgs(rest)
   const configPath = flags.config ?? 'mowa.eval.yml'
 
+  if (!command || command === 'help' || command === '--help' || command === '-h' || flags.help === 'true' || flags.h === 'true') return cmdHelp()
+
   switch (command) {
     case 'scan': return cmdScan(flags)
     case 'init': return cmdInit(flags)
     case 'generate': return cmdGenerate(configPath, positional[0])
-    case 'eval': case undefined: return cmdEval(configPath, positional[0], flags.base)
+    case 'eval': return cmdEval(configPath, positional[0], flags.base)
     default:
-      console.error(`Unknown command "${command}". Try: scan · init · generate · eval`)
+      console.error(`Unknown command "${command}".\n`)
+      cmdHelp()
       process.exit(2)
   }
+}
+
+function cmdHelp() {
+  const b = pc.bold
+  console.log(`${b('mowa')} — a test runner for prompts. Score them, and fail the PR when one regresses.
+
+${b('Usage')}
+  mowa <command> [options]
+
+${b('Commands')}
+  scan            Find the prompts in this repo (AI-reviewed when a key is set)
+  init            Scaffold mowa.eval.yml from the prompts it finds
+  generate [id]   Write test cases for a prompt (or all of them)
+  eval [id]       Score prompts; exits non-zero on regression or below threshold
+
+${b('Options')}
+  --config <path>   Config file (default: mowa.eval.yml)
+  --base <ref>      eval: compare against a git ref to catch regressions
+  --model <id>      Model for discovery/generation (default: google:gemini-2.5-flash)
+  --no-ai           scan/init: heuristic only, no model calls
+  --sample          init: start from a blank example instead of your prompts
+
+${b('Setup')}
+  export GOOGLE_API_KEY=...        # or OPENAI_API_KEY / ANTHROPIC_API_KEY
+
+${b('Quickstart')}
+  mowa init && mowa generate && mowa eval
+
+Docs: https://github.com/bluesky-tech-inc/mowa-eval`)
 }
 
 async function cmdScan(flags: Record<string, string>) {
