@@ -1,0 +1,26 @@
+version: 1
+standard: "2.0"
+defaults:
+  reference_model: google:gemini-2.5-flash
+  judge: google:gemini-2.5-flash
+prompts:
+  - id: recipe
+    file: prompts/recipe.md
+    tests: tests/recipe.jsonl
+    contract:
+      intent: Turn a meal name into a structured recipe
+      input: { type: text, description: a meal name }
+      output:
+        kind: structured
+        description: a recipe object with ingredients and steps
+        jsonSchema:
+          type: object
+          properties:
+            ingredients: { type: array }
+            steps: { type: array }
+          required: [ingredients, steps]
+    checks:
+      - { type: max_length, max: 4000 }
+    threshold:
+      min: 70
+      max_regression: 8

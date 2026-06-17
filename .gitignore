@@ -1,0 +1,5 @@
+node_modules
+dist
+.mowa/cache
+*.log
+.DS_Store

@@ -1,0 +1,16 @@
+name: prompts
+on: pull_request
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history so the base branch can be scored
+      - uses: ./ # in your repo this is: mowa-dev/eval@v1
+        with:
+          config: examples/mowa.eval.yml
+          base-ref: ${{ github.base_ref }}
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}

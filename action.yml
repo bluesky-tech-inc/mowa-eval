@@ -1,0 +1,17 @@
+name: mowa eval
+description: Score prompts and fail the PR when one regresses.
+inputs:
+  config:
+    description: Path to mowa.eval.yml
+    default: mowa.eval.yml
+  base-ref:
+    description: Git ref to compare against for regression (usually the PR base)
+    default: ${{ github.base_ref }}
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        npx -y mowa-eval@latest eval \
+          --config "${{ inputs.config }}" \
+          ${{ inputs.base-ref && format('--base origin/{0}', inputs.base-ref) || '' }}
