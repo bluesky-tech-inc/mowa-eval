@@ -12,7 +12,7 @@ import { readFileAtRef, repoRelative } from '../git/refs'
 import { printReport, type PromptReport } from '../report/tty'
 import { INIT_CONFIG, INIT_PROMPT, INIT_TESTS } from './scaffold'
 import { scanRepo } from '../discover/scan'
-import { refineCandidates, hasAnyKey } from '../discover/agent'
+import { discoverFromFiles, hasAnyKey } from '../discover/agent'
 import { stringify } from 'yaml'
 
 const DEFAULT_MODEL = 'google:gemini-2.5-flash'
@@ -40,9 +40,10 @@ async function discover(flags: Record<string, string>): Promise<{ items: Found[]
     }
   }
 
-  const refined = await refineCandidates({ candidates, modelId: flags.model ?? DEFAULT_MODEL })
+  // AI path: read prompt-bearing files in full and extract the embedded prompts.
+  const refined = await discoverFromFiles({ root: process.cwd(), modelId: flags.model ?? DEFAULT_MODEL })
   return {
-    items: refined.map(r => ({ id: r.id, file: r.candidate.file, source: r.candidate.source, text: r.candidate.text, outputKind: r.outputKind, intent: r.intent, confidence: r.candidate.confidence })),
+    items: refined.map(r => ({ id: r.id, file: r.file, source: r.source, text: r.text, outputKind: r.outputKind, intent: r.intent, confidence: 0.9 })),
     usedAI: true,
   }
 }

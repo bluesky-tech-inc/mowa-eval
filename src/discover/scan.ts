@@ -23,6 +23,37 @@ const TEXT_EXT = new Set(['.md', '.txt', '.prompt'])
 const MAX_BYTES = 256 * 1024
 const MIN_PROMPT_CHARS = 60
 
+// A file likely to contain prompts, for the AI extraction pass to read in full.
+// Scored so we read the most promising files first (and can cap the count).
+export interface PromptFile {
+  rel: string
+  content: string
+  score: number
+}
+
+const LLM_SIGNALS = /@ai-sdk|generateText|generateObject|streamText|chat\.completions|\bmessages\s*:|\bsystem\s*:|new OpenAI|new Anthropic|GoogleGenerativeAI/gi
+const LONG_LITERAL = /`[^`]{120,}`|"[^"]{120,}"|'[^']{120,}'/
+
+export function findPromptFiles(root: string): PromptFile[] {
+  const files: PromptFile[] = []
+  for (const file of walk(root)) {
+    const ext = extname(file)
+    const rel = relative(root, file)
+    if (TEXT_EXT.has(ext)) {
+      const looksPrompty = ext === '.prompt' || rel.split(sep).includes('prompts') || /prompt/i.test(basename(file))
+      const content = read(file)
+      if (looksPrompty && isPromptish(content)) files.push({ rel, content, score: 100 })
+    } else if (CODE_EXT.has(ext)) {
+      const content = read(file)
+      let score = (content.match(LLM_SIGNALS) ?? []).length * 3
+      if (PROMPTY_NAME.test(content)) score += 2
+      if (LONG_LITERAL.test(content)) score += 2
+      if (score >= 3) files.push({ rel, content, score })
+    }
+  }
+  return files.sort((a, b) => b.score - a.score)
+}
+
 export function scanRepo(root: string): Candidate[] {
   const found: Candidate[] = []
   for (const file of walk(root)) {

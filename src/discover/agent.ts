@@ -1,69 +1,94 @@
 import { generateObject } from 'ai'
 import { z } from 'zod'
 import { resolveModel } from '../providers/index'
-import type { Candidate } from './scan'
+import { findPromptFiles, type PromptFile } from './scan'
 
-// The heuristic scan casts a wide net; this is the judgement pass. An agent reads
-// each candidate and decides whether it's really a prompt, what to call it, what
-// it's for, and what it produces — dropping false positives (a stray template
-// fragment, a log string) the regex can't tell apart. Used when a key is present
-// and the user hasn't pointed at specific prompts.
+// AI discovery: read the prompt-bearing files in a repo and pull out the prompts
+// embedded in them — the full instruction text, a name, and what it's for —
+// regardless of how the variable was named or whether it spans many lines. This
+// is what the heuristic scan can't do: find a prompt the regex missed and recover
+// its exact text. Used when a key is present and the user hasn't pointed at files.
 
 export interface DiscoveredPrompt {
-  candidate: Candidate
   id: string
+  file: string
+  text: string
   intent: string
   role: 'system' | 'user' | 'template' | 'other'
   outputKind: 'text' | 'structured'
+  source: 'file' | 'embedded'
 }
 
-const schema = z.object({
+const fileSchema = z.object({
   prompts: z.array(
     z.object({
-      ref: z.number().int(),
-      isPrompt: z.boolean(),
       id: z.string(),
       intent: z.string(),
       role: z.enum(['system', 'user', 'template', 'other']),
       outputKind: z.enum(['text', 'structured']),
+      text: z.string(),
     }),
   ),
 })
 
-export async function refineCandidates(args: { candidates: Candidate[]; modelId: string }): Promise<DiscoveredPrompt[]> {
-  if (!args.candidates.length) return []
+const SYSTEM = `You extract the AI prompts embedded in a source file.
 
-  const listing = args.candidates
-    .map((c, i) => `[${i}] file=${c.file} name=${c.name}\n${c.text.slice(0, 600)}`)
-    .join('\n\n---\n\n')
+A prompt is instruction text written to be sent to a language model — a system
+prompt, or a user-message template. Return its EXACT text as written in the file:
+keep \${...} / {{...}} placeholders, resolve trivial string concatenation, and
+drop the surrounding code. Ignore logs, error strings, UI copy, and SQL.
 
-  const { object } = await generateObject({
-    model: resolveModel(args.modelId),
-    schema,
-    temperature: 0,
-    system: `You are reviewing strings pulled from a codebase to find the AI prompts worth evaluating.
+Only return substantial prompts — system prompts and real user-message templates.
+Ignore short tool/parameter descriptions, field labels, and one-line strings that
+are part of a schema rather than an instruction to the model.
 
-For each candidate decide:
-- isPrompt: true only if it is an instruction to a model (a system prompt, or a real user-message template). false for log lines, error strings, UI copy, or fragments that are just variable interpolation with no instruction.
-- id: a short kebab-case identifier from its purpose (e.g. "pr-reviewer", "test-generator").
-- intent: one plain sentence on what the prompt is for.
-- role: system | user | template | other.
-- outputKind: "structured" if it asks for JSON / a fixed shape, else "text".
+For each prompt give: id (short kebab-case from its purpose), intent (one plain
+sentence), role (system | user | template | other), and outputKind ("structured"
+if it asks for JSON or a fixed shape, else "text"). If the file has no prompts,
+return an empty list.`
 
-Prefer system prompts and standalone prompt files. Keep the reference number.`,
-    prompt: `Candidates:\n\n${listing}`,
-  })
+const MAX_FILES = 25
+const MAX_CHARS = 14000
 
-  const out: DiscoveredPrompt[] = []
+export async function discoverFromFiles(args: { root: string; modelId: string }): Promise<DiscoveredPrompt[]> {
+  const files = findPromptFiles(args.root).slice(0, MAX_FILES)
+  const model = resolveModel(args.modelId)
+
+  const perFile = await Promise.all(files.map(f => extractOne(model, f)))
+  return dedupe(perFile.flat())
+}
+
+async function extractOne(model: Parameters<typeof generateObject>[0]['model'], file: PromptFile): Promise<DiscoveredPrompt[]> {
+  try {
+    const { object } = await generateObject({
+      model,
+      schema: fileSchema,
+      temperature: 0,
+      system: SYSTEM,
+      prompt: `FILE: ${file.rel}\n\n${file.content.slice(0, MAX_CHARS)}`,
+    })
+    const isFile = /\.(md|txt|prompt)$/i.test(file.rel)
+    return object.prompts
+      .filter(p => p.role !== 'other' && p.text.trim().length > 0)
+      .map(p => ({ ...p, file: file.rel, source: isFile ? 'file' : 'embedded' }))
+  } catch {
+    return []
+  }
+}
+
+function dedupe(prompts: DiscoveredPrompt[]): DiscoveredPrompt[] {
+  const seenText = new Set<string>()
   const usedIds = new Set<string>()
-  for (const r of object.prompts) {
-    const candidate = args.candidates[r.ref]
-    if (!candidate || !r.isPrompt || r.role === 'other') continue
-    let id = (r.id || candidate.id).trim() || candidate.id
+  const out: DiscoveredPrompt[] = []
+  for (const p of prompts) {
+    const key = p.text.replace(/\s+/g, ' ').trim().slice(0, 200)
+    if (seenText.has(key)) continue
+    seenText.add(key)
+    let id = p.id?.trim() || 'prompt'
     let n = 2
-    while (usedIds.has(id)) id = `${r.id}-${n++}`
+    while (usedIds.has(id)) id = `${p.id}-${n++}`
     usedIds.add(id)
-    out.push({ candidate, id, intent: r.intent, role: r.role, outputKind: r.outputKind })
+    out.push({ ...p, id })
   }
   return out
 }
