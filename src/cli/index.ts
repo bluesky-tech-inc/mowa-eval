@@ -11,6 +11,7 @@ import { makeJudge, makeReviewer } from '../judges/index'
 import { generateTests } from '../generators/index'
 import { readFileAtRef, repoRelative } from '../git/refs'
 import { printReport, type PromptReport } from '../report/tty'
+import { spin } from '../report/spinner'
 import { INIT_CONFIG, INIT_PROMPT, INIT_TESTS } from './scaffold'
 import { scanRepo } from '../discover/scan'
 import { discoverFromFiles } from '../discover/agent'
@@ -34,7 +35,7 @@ interface Found {
 
 // Heuristic scan gathers candidates; an AI agent then confirms and names them
 // when a key is present and the user hasn't opted out with --no-ai.
-async function discover(flags: Record<string, string>): Promise<{ items: Found[]; usedAI: boolean }> {
+async function discover(flags: Record<string, string>, onProgress?: (done: number, total: number) => void): Promise<{ items: Found[]; usedAI: boolean }> {
   const candidates = scanRepo(process.cwd())
   if (!candidates.length) return { items: [], usedAI: false }
 
@@ -48,7 +49,7 @@ async function discover(flags: Record<string, string>): Promise<{ items: Found[]
 
   // AI path: read prompt-bearing files in full and extract the embedded prompts
   // with their whole contract.
-  const refined = await discoverFromFiles({ root: process.cwd(), modelId: flags.model ?? DEFAULT_MODEL })
+  const refined = await discoverFromFiles({ root: process.cwd(), modelId: flags.model ?? DEFAULT_MODEL, onProgress })
   return {
     items: refined.map(r => ({
       id: r.id, file: r.file, source: r.source, text: r.text, intent: r.intent,
@@ -155,7 +156,9 @@ Docs: https://github.com/bluesky-tech-inc/mowa-eval`)
 
 async function cmdScan(flags: Record<string, string>) {
   ensureKeyOrExit(flags)
-  const { items, usedAI } = await discover(flags)
+  const sp = flags['no-ai'] === 'true' ? null : spin('Finding prompts…')
+  const { items, usedAI } = await discover(flags, (d, t) => sp?.update(`Reviewing files with the agent… ${d}/${t}`))
+  sp?.stop()
   if (!items.length) {
     console.log('No prompts found. They live in .md/.txt/.prompt files, or in string literals named like a prompt (PROMPT, system, …).')
     return
@@ -171,7 +174,11 @@ async function cmdScan(flags: Record<string, string>) {
 
 async function cmdInit(flags: Record<string, string>) {
   if (flags.sample !== 'true') ensureKeyOrExit(flags)
-  const { items, usedAI } = flags.sample === 'true' ? { items: [] as Found[], usedAI: false } : await discover(flags)
+  const sp = flags.sample === 'true' || flags['no-ai'] === 'true' ? null : spin('Finding prompts…')
+  const { items, usedAI } = flags.sample === 'true'
+    ? { items: [] as Found[], usedAI: false }
+    : await discover(flags, (d, t) => sp?.update(`Reviewing files with the agent… ${d}/${t}`))
+  sp?.stop()
   if (!items.length) {
     write('mowa.eval.yml', INIT_CONFIG)
     write('prompts/recipe.md', INIT_PROMPT)
@@ -219,7 +226,8 @@ async function cmdGenerate(configPath: string, id?: string) {
   const loaded = loadConfig(configPath)
   for (const p of pick(loaded, id)) {
     const content = readPromptContent(loaded, p)
-    const tests = await generateTests({ promptContent: content, contract: p.contract, modelId: modelFor(loaded, p) })
+    const sp = spin(`Generating test cases for ${p.id}…`)
+    const tests = await generateTests({ promptContent: content, contract: p.contract, modelId: modelFor(loaded, p) }).finally(() => sp.stop())
     const out = resolve(loaded.dir, p.tests)
     mkdirSync(dirname(out), { recursive: true })
     writeFileSync(out, tests.map(t => JSON.stringify(t)).join('\n') + '\n')
@@ -239,8 +247,14 @@ async function cmdEval(configPath: string, id?: string, base?: string) {
       continue
     }
 
-    const result = await scoreOne(loaded, p, content, tests)
-    const baseScore = base ? await scoreBase(loaded, p, tests, base) : null
+    const sp = spin(`Scoring ${p.id}…`)
+    const result = await scoreOne(loaded, p, content, tests, (d, t) => sp.update(`Scoring ${p.id}… ${d}/${t}`))
+    let baseScore: number | null = null
+    if (base) {
+      sp.update(`Scoring ${p.id} on ${base} (baseline)…`)
+      baseScore = await scoreBase(loaded, p, tests, base)
+    }
+    sp.stop()
 
     const failed: PromptReport['failed'] = []
     const { min, max_regression } = p.threshold
@@ -256,7 +270,7 @@ async function cmdEval(configPath: string, id?: string, base?: string) {
   process.exit(broke ? 1 : 0)
 }
 
-function scoreOne(loaded: LoadedConfig, p: PromptConfig, content: string, tests: TestCase[]): Promise<PromptResult> {
+function scoreOne(loaded: LoadedConfig, p: PromptConfig, content: string, tests: TestCase[], onProgress?: (done: number, total: number) => void): Promise<PromptResult> {
   return scorePrompt({
     promptContent: content,
     contract: p.contract,
@@ -265,6 +279,7 @@ function scoreOne(loaded: LoadedConfig, p: PromptConfig, content: string, tests:
     judge: makeJudge(judgeFor(loaded, p)),
     review: makeReviewer(judgeFor(loaded, p)),
     extraChecks: p.checks.map(toRbcSpec),
+    onProgress,
   })
 }
 

@@ -64,10 +64,13 @@ If the file has none, return an empty list.`
 const MAX_FILES = 25
 const MAX_CHARS = 14000
 
-export async function discoverFromFiles(args: { root: string; modelId: string }): Promise<DiscoveredPrompt[]> {
+export async function discoverFromFiles(args: { root: string; modelId: string; onProgress?: (done: number, total: number) => void }): Promise<DiscoveredPrompt[]> {
   const files = findPromptFiles(args.root).slice(0, MAX_FILES)
   const model = resolveModel(args.modelId)
-  const perFile = await Promise.all(files.map(f => extractOne(model, f)))
+  let done = 0
+  const perFile = await Promise.all(
+    files.map(f => extractOne(model, f).then(r => { args.onProgress?.(++done, files.length); return r })),
+  )
   const prompts = dedupe(perFile.flat())
 
   // A structured contract is useless without a schema; if the extraction left it

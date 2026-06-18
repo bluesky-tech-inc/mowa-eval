@@ -60,6 +60,7 @@ export async function scorePrompt(args: {
   judge: Judge
   review?: ReviewPrompt
   extraChecks?: RbcSpec[]
+  onProgress?: (done: number, total: number) => void
 }): Promise<PromptResult> {
   const { promptContent, contract, tests, run, judge, review } = args
   const specs = [...deriveRbcSpecs(contract), ...(args.extraChecks ?? [])]
@@ -95,6 +96,7 @@ export async function scorePrompt(args: {
       whatFailed: verdict.whatFailed,
       suggestion: verdict.suggestion,
     })
+    args.onProgress?.(cases.length, tests.length)
   }
 
   const { fraction, hardFail } = conformanceOf(allResults)
