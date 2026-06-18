@@ -37,6 +37,45 @@ reads and grades.
 > for you, track score history, and let your team manage them in a UI? That's
 > [**mowa.dev**](https://mowa.dev) — this CLI is the open, BYOK test+eval engine.
 
+## Point mowa at a prompt
+
+A "prompt" is just a text file. Say you have one:
+
+```
+prompts/support.md     "You are a support agent. Classify the ticket as billing, technical, or account…"
+```
+
+1. **Register it.** This adds a block to `mowa.eval.yml`:
+   ```bash
+   mowa add prompts/support.md          # id defaults to "support"
+   ```
+   If your prompt is currently a string inside source code, copy it into a `.md`
+   (or `.txt`) file first and point at that — committing the file is what lets mowa
+   track changes to it over time.
+
+2. **Fill in its contract** in `mowa.eval.yml` — this is the one manual step, and
+   it's what every later stage hangs off:
+   ```yaml
+   - id: support
+     file: prompts/support.md
+     tests: tests/support.jsonl
+     contract:
+       intent: Classify a support ticket into billing, technical, or account
+       input:  { type: text, description: the ticket text }
+       output: { kind: text, description: one category word }
+     threshold: { min: 70, max_regression: 8 }
+   ```
+   `intent` is what the judge scores against; `input`/`output` decide which checks
+   run and how outputs are compared. (For `kind: structured`, add a `jsonSchema`.)
+
+3. **Generate tests and score it:**
+   ```bash
+   mowa generate support      # writes tests/support.jsonl
+   mowa eval support          # prints the score
+   ```
+
+Repeat `mowa add` for each prompt. `mowa list` shows everything you've registered.
+
 ## Commands
 
 ### `mowa setup <provider> <key>`

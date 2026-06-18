@@ -1,27 +1,33 @@
-export const INIT_CONFIG = `version: 1
+export const INIT_CONFIG = `# mowa.eval.yml — what mowa tests, and the bar it must clear.
+# One block per prompt. Point \`file:\` at a prompt, describe its contract, set a threshold.
+# Add your own with \`mowa add path/to/prompt.md\`, or copy the block below.
+version: 1
 standard: "2.0"
 defaults:
-  reference_model: google:gemini-2.5-flash
-  judge: google:gemini-2.5-flash
+  reference_model: google:gemini-2.5-flash   # the model your prompt runs on
+  judge: google:gemini-2.5-flash             # the model that grades the output
+
 prompts:
-  - id: recipe
-    file: prompts/recipe.md
-    tests: tests/recipe.jsonl
-    contract:
-      intent: Turn a meal name into a structured recipe
-      input: { type: text, description: a meal name }
+  - id: recipe                     # name you pass to \`mowa generate <id>\` / \`mowa eval <id>\`
+    file: prompts/recipe.md        # POINT THIS at your prompt file (any text file)
+    tests: tests/recipe.jsonl      # test cases — create them with \`mowa generate recipe\`
+    contract:                      # what the prompt takes and returns
+      intent: Turn a meal name into a structured recipe   # one line: what it's for
+      input:
+        type: text                 # text | image | number | boolean | enum | json
+        description: a meal name
       output:
-        kind: structured
+        kind: structured           # text | structured | image | video
         description: a recipe object
-        jsonSchema:
+        jsonSchema:                # only for kind: structured — drives the required-keys check
           type: object
           properties:
             ingredients: { type: array }
             steps: { type: array }
           required: [ingredients, steps]
     threshold:
-      min: 70
-      max_regression: 8
+      min: 70                      # fail if the score is below this
+      max_regression: 8            # fail if it drops this many points vs the base branch (in CI)
 `
 
 export const INIT_PROMPT = `You turn a meal name into a recipe.
