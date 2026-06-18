@@ -83,6 +83,7 @@ async function main() {
 
   switch (command) {
     case 'setup': return cmdSetup(positional, flags)
+    case 'list': case 'ls': return cmdList(configPath)
     case 'scan': return cmdScan(flags)
     case 'init': return cmdInit(flags)
     case 'generate': return cmdGenerate(configPath, positional[0])
@@ -122,6 +123,22 @@ function cmdSetup(positional: string[], flags: Record<string, string>) {
   console.log(pc.dim('Try it: mowa scan'))
 }
 
+function cmdList(configPath: string) {
+  const loaded = loadConfig(configPath)
+  const prompts = loaded.config.prompts
+  if (!prompts.length) {
+    console.log(`No prompts in ${configPath}. Run \`mowa init\`.`)
+    return
+  }
+  console.log(`${pc.bold(String(prompts.length))} prompt${prompts.length === 1 ? '' : 's'} in ${configPath}:\n`)
+  for (const p of prompts) {
+    const n = readTests(loaded, p).length
+    const tests = n ? `${n} test${n === 1 ? '' : 's'}` : pc.yellow('no tests')
+    console.log(`  ${pc.bold(p.id)}  ${pc.dim(`${p.file} · ${p.contract.output.kind} · ${tests}`)}`)
+    if (p.contract.intent) console.log(pc.dim(`    ${p.contract.intent}`))
+  }
+}
+
 function cmdHelp() {
   const b = pc.bold
   console.log(`${b('mowa')} — a test runner for prompts. Score them, and fail the PR when one regresses.
@@ -133,6 +150,7 @@ ${b('Commands')}
   setup <p> <key> Save an API key to .env (provider: google | openai | anthropic)
   scan            Find the prompts in this repo (AI-reviewed when a key is set)
   init            Scaffold mowa.eval.yml from the prompts it finds
+  list            List the prompts (and ids) in mowa.eval.yml — offline, no key
   generate [id]   Write test cases for a prompt (id = name in mowa.eval.yml; omit for all)
   eval [id]       Score prompts; exits non-zero on regression or below threshold
 
