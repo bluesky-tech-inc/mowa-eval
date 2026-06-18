@@ -161,6 +161,7 @@ ${b('Options')}
   --model <id>      Model for discovery/generation (default: google:gemini-2.5-flash)
   --no-ai           scan/init: heuristic only, no model calls
   --sample          init: start from a blank example instead of your prompts
+  --force           init: overwrite an existing mowa.eval.yml (and prompt copies)
 
 ${b('Providers')} ${pc.dim('(set one key — used to find prompts, generate tests, and judge)')}
 ${PROVIDERS.map(p => `  ${p.env.padEnd(24)}${pc.dim(`${p.name} · ${p.model}`)}`).join('\n')}
@@ -207,6 +208,12 @@ async function cmdInit(flags: Record<string, string>) {
     return
   }
 
+  const force = flags.force === 'true'
+  if (existsSync(resolve('mowa.eval.yml')) && !force) {
+    console.log(pc.yellow('\nmowa.eval.yml already exists.'), 'Run', pc.bold('mowa init --force'), 'to regenerate it, or', pc.bold('mowa list'), 'to see what\'s there.')
+    return
+  }
+
   console.log(`Found ${pc.bold(String(items.length))} prompt${items.length === 1 ? '' : 's'}${usedAI ? pc.dim(' (AI-reviewed)') : ''} in your repo.`)
   const top = items.slice(0, 25)
   const config = {
@@ -215,10 +222,10 @@ async function cmdInit(flags: Record<string, string>) {
     defaults: { reference_model: DEFAULT_MODEL, judge: DEFAULT_MODEL },
     prompts: top.map(configEntry),
   }
-  write('mowa.eval.yml', stringify(config))
+  write('mowa.eval.yml', stringify(config), true)
   for (const c of top) {
     // Embedded prompts get lifted into a file so they can be versioned and graded.
-    if (c.source === 'embedded') write(`prompts/${c.id}.md`, c.text.trim() + '\n')
+    if (c.source === 'embedded') write(`prompts/${c.id}.md`, c.text.trim() + '\n', force)
   }
   console.log(pc.dim(`\nPrompts: ${top.map(c => c.id).join(', ')}`))
   console.log(pc.green('\nReady.'), 'Review mowa.eval.yml, then:')
@@ -360,9 +367,9 @@ function toRbcSpec(c: { type: string } & Record<string, unknown>): RbcSpec {
   return { id: c.type, label: c.type, kind, ...c } as RbcSpec
 }
 
-function write(rel: string, body: string) {
+function write(rel: string, body: string, force = false) {
   const abs = resolve(rel)
-  if (existsSync(abs)) { console.log(pc.dim(`· ${rel} exists, skipped`)); return }
+  if (existsSync(abs) && !force) { console.log(pc.dim(`· ${rel} exists, skipped`)); return }
   mkdirSync(dirname(abs), { recursive: true })
   writeFileSync(abs, body)
   console.log(pc.green(`✓ ${rel}`))

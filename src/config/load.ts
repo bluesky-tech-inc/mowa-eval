@@ -18,7 +18,11 @@ export function loadConfig(path: string): LoadedConfig {
 }
 
 export function readPromptContent(loaded: LoadedConfig, p: PromptConfig): string {
-  return readFileSync(resolve(loaded.dir, p.file), 'utf8')
+  const abs = resolve(loaded.dir, p.file)
+  if (!existsSync(abs)) {
+    throw new Error(`Prompt file not found: ${p.file} (for "${p.id}"). Re-run \`mowa init --force\`, or fix the path in mowa.eval.yml.`)
+  }
+  return readFileSync(abs, 'utf8')
 }
 
 export function readTests(loaded: LoadedConfig, p: PromptConfig): TestCase[] {
