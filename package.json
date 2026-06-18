@@ -4,13 +4,20 @@
   "description": "A test runner for prompts. Score them, and fail the PR when one regresses.",
   "license": "MIT",
   "type": "module",
+  "keywords": ["prompt-engineering", "llm", "prompts", "prompt-testing", "evals", "evaluation", "ci", "github-action", "ai"],
+  "homepage": "https://github.com/bluesky-tech-inc/mowa-eval#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/bluesky-tech-inc/mowa-eval.git" },
+  "bugs": { "url": "https://github.com/bluesky-tech-inc/mowa-eval/issues" },
+  "engines": { "node": ">=20" },
   "bin": { "mowa": "./dist/cli.js" },
   "files": ["dist"],
+  "publishConfig": { "access": "public" },
   "scripts": {
     "mowa": "tsx src/cli/index.ts",
     "build": "tsup",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.66",

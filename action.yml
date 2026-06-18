@@ -1,5 +1,8 @@
 name: mowa eval
 description: Score prompts and fail the PR when one regresses.
+branding:
+  icon: check-circle
+  color: green
 inputs:
   config:
     description: Path to mowa.eval.yml
