@@ -20,12 +20,20 @@ npx mowa-eval generate      # writes test cases for each
 npx mowa-eval eval          # run + see the score
 ```
 
-You don't have to point it at anything. `init` scans your codebase for prompts —
-standalone `.md`/`.prompt` files and string literals named like a prompt — then,
-if a key is set, an **AI agent reviews the candidates**: it confirms which are real
-prompts, names them, and infers each one's intent. Run `mowa scan` to preview what
-it finds. Pass `--no-ai` to stay purely heuristic, or `--sample` to start from a
-blank example instead.
+You don't have to point it at anything. `init` reads your codebase with an **AI
+agent**: it finds the prompts (standalone files and ones embedded in source),
+names them, and infers each one's full contract — intent, input, and output shape.
+Set a key first (any provider below); run `mowa scan` to preview what it finds.
+
+```
+Providers (set one key)
+  GOOGLE_API_KEY      Google Gemini   google:gemini-2.5-flash
+  OPENAI_API_KEY      OpenAI          openai:gpt-4o
+  ANTHROPIC_API_KEY   Anthropic       anthropic:claude-sonnet-4-5
+```
+
+Pass `--no-ai` for a rough keyless heuristic pass, or `--sample` to start from a
+blank example.
 
 You commit two files per prompt plus one config:
 

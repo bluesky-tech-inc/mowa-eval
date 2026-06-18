@@ -8,6 +8,18 @@ import type { RunPrompt } from '../core/index'
 // from the environment. Bring-your-own-key: nothing is read from config or
 // written to logs. Image/video generation is not wired yet — see the stub below.
 
+// The built-in providers, their key env var, and an example model id. Shown in
+// help and the no-key message so a user knows exactly what to set.
+export const PROVIDERS = [
+  { name: 'Google Gemini', env: 'GOOGLE_API_KEY', model: 'google:gemini-2.5-flash' },
+  { name: 'OpenAI', env: 'OPENAI_API_KEY', model: 'openai:gpt-4o' },
+  { name: 'Anthropic', env: 'ANTHROPIC_API_KEY', model: 'anthropic:claude-sonnet-4-5' },
+] as const
+
+export function hasAnyKey(): boolean {
+  return PROVIDERS.some(p => process.env[p.env]) || Boolean(process.env.GOOGLE_GENERATIVE_AI_API_KEY)
+}
+
 export interface ModelRef {
   provider: string
   model: string

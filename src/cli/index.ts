@@ -5,14 +5,14 @@ import pc from 'picocolors'
 import { scorePrompt, type TestCase, type RbcSpec, type PromptResult } from '../core/index'
 import { loadConfig, readPromptContent, readTests, type LoadedConfig } from '../config/load'
 import { evalConfig, type PromptConfig } from '../config/schema'
-import { makeRunner } from '../providers/index'
+import { makeRunner, hasAnyKey, PROVIDERS } from '../providers/index'
 import { makeJudge, makeReviewer } from '../judges/index'
 import { generateTests } from '../generators/index'
 import { readFileAtRef, repoRelative } from '../git/refs'
 import { printReport, type PromptReport } from '../report/tty'
 import { INIT_CONFIG, INIT_PROMPT, INIT_TESTS } from './scaffold'
 import { scanRepo } from '../discover/scan'
-import { discoverFromFiles, hasAnyKey } from '../discover/agent'
+import { discoverFromFiles } from '../discover/agent'
 import { stringify } from 'yaml'
 
 const DEFAULT_MODEL = 'google:gemini-2.5-flash'
@@ -22,8 +22,12 @@ interface Found {
   file: string
   source: 'file' | 'embedded'
   text: string
-  outputKind: 'text' | 'structured'
   intent: string
+  inputType: string
+  inputDescription: string
+  outputKind: 'text' | 'structured' | 'image' | 'video'
+  outputDescription: string
+  jsonSchema?: Record<string, unknown>
   confidence: number
 }
 
@@ -33,19 +37,38 @@ async function discover(flags: Record<string, string>): Promise<{ items: Found[]
   const candidates = scanRepo(process.cwd())
   if (!candidates.length) return { items: [], usedAI: false }
 
-  if (flags['no-ai'] === 'true' || !hasAnyKey()) {
+  if (flags['no-ai'] === 'true') {
+    // Explicit heuristic pass — fast, no key, but contracts come out empty.
     return {
-      items: candidates.map(c => ({ id: c.id, file: c.file, source: c.source, text: c.text, outputKind: c.outputKind, intent: '', confidence: c.confidence })),
+      items: candidates.map(c => ({ id: c.id, file: c.file, source: c.source, text: c.text, intent: '', inputType: 'text', inputDescription: '', outputKind: c.outputKind, outputDescription: '', confidence: c.confidence })),
       usedAI: false,
     }
   }
 
-  // AI path: read prompt-bearing files in full and extract the embedded prompts.
+  // AI path: read prompt-bearing files in full and extract the embedded prompts
+  // with their whole contract.
   const refined = await discoverFromFiles({ root: process.cwd(), modelId: flags.model ?? DEFAULT_MODEL })
   return {
-    items: refined.map(r => ({ id: r.id, file: r.file, source: r.source, text: r.text, outputKind: r.outputKind, intent: r.intent, confidence: 0.9 })),
+    items: refined.map(r => ({
+      id: r.id, file: r.file, source: r.source, text: r.text, intent: r.intent,
+      inputType: r.inputType, inputDescription: r.inputDescription,
+      outputKind: r.outputKind, outputDescription: r.outputDescription, jsonSchema: r.jsonSchema,
+      confidence: 0.9,
+    })),
     usedAI: true,
   }
+}
+
+// mowa is useless without a model — without one it can't name prompts or infer
+// contracts, so refuse rather than dump empty entries. --no-ai is the escape hatch.
+function ensureKeyOrExit(flags: Record<string, string>) {
+  if (flags['no-ai'] === 'true' || hasAnyKey()) return
+  console.log(`mowa needs an AI key — it reads your prompts to name them and infer their contracts.\n`)
+  console.log('Set one of these, then run again:')
+  for (const p of PROVIDERS) console.log(`  ${pc.bold(p.env.padEnd(22))} ${pc.dim(`# ${p.name} · ${p.model}`)}`)
+  console.log(pc.dim(`\n  export ${PROVIDERS[0]!.env}=...\n`))
+  console.log(pc.dim('Advanced: `--no-ai` does a rough heuristic pass with no key (contracts come out blank).'))
+  process.exit(1)
 }
 
 async function main() {
@@ -87,16 +110,19 @@ ${b('Options')}
   --no-ai           scan/init: heuristic only, no model calls
   --sample          init: start from a blank example instead of your prompts
 
-${b('Setup')}
-  export GOOGLE_API_KEY=...        # or OPENAI_API_KEY / ANTHROPIC_API_KEY
+${b('Providers')} ${pc.dim('(set one key — used to find prompts, generate tests, and judge)')}
+${PROVIDERS.map(p => `  ${p.env.padEnd(24)}${pc.dim(`${p.name} · ${p.model}`)}`).join('\n')}
+  ${pc.dim('pick a model with --model <provider:model>; default is ' + DEFAULT_MODEL)}
 
 ${b('Quickstart')}
+  export GOOGLE_API_KEY=...
   mowa init && mowa generate && mowa eval
 
 Docs: https://github.com/bluesky-tech-inc/mowa-eval`)
 }
 
 async function cmdScan(flags: Record<string, string>) {
+  ensureKeyOrExit(flags)
   const { items, usedAI } = await discover(flags)
   if (!items.length) {
     console.log('No prompts found. They live in .md/.txt/.prompt files, or in string literals named like a prompt (PROMPT, system, …).')
@@ -112,6 +138,7 @@ async function cmdScan(flags: Record<string, string>) {
 }
 
 async function cmdInit(flags: Record<string, string>) {
+  if (flags.sample !== 'true') ensureKeyOrExit(flags)
   const { items, usedAI } = flags.sample === 'true' ? { items: [] as Found[], usedAI: false } : await discover(flags)
   if (!items.length) {
     write('mowa.eval.yml', INIT_CONFIG)
@@ -135,20 +162,23 @@ async function cmdInit(flags: Record<string, string>) {
     // Embedded prompts get lifted into a file so they can be versioned and graded.
     if (c.source === 'embedded') write(`prompts/${c.id}.md`, c.text.trim() + '\n')
   }
-  console.log(pc.green('\nReady.'), 'Next: set an API key, then')
+  console.log(pc.green('\nReady.'), 'Review mowa.eval.yml, then:')
   console.log(pc.dim('  mowa generate   # write test cases for each prompt'))
   console.log(pc.dim('  mowa eval       # score them'))
-  if (!usedAI) console.log(pc.dim('Fill in each contract\'s intent in mowa.eval.yml (set a key to have the agent infer them).'))
 }
 
 function configEntry(c: Found) {
-  const output: Record<string, unknown> = { kind: c.outputKind, description: '' }
-  if (c.outputKind === 'structured') output.jsonSchema = { type: 'object', properties: {} }
+  const output: Record<string, unknown> = { kind: c.outputKind, description: c.outputDescription }
+  if (c.outputKind === 'structured') output.jsonSchema = c.jsonSchema ?? { type: 'object', properties: {} }
   return {
     id: c.id,
     file: c.source === 'embedded' ? `prompts/${c.id}.md` : c.file,
     tests: `tests/${c.id}.jsonl`,
-    contract: { intent: c.intent, input: { type: 'text', description: '' }, output },
+    contract: {
+      intent: c.intent,
+      input: { type: c.inputType || 'text', description: c.inputDescription },
+      output,
+    },
     threshold: { min: 70, max_regression: 8 },
   }
 }

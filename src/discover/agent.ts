@@ -4,10 +4,9 @@ import { resolveModel } from '../providers/index'
 import { findPromptFiles, type PromptFile } from './scan'
 
 // AI discovery: read the prompt-bearing files in a repo and pull out the prompts
-// embedded in them — the full instruction text, a name, and what it's for —
-// regardless of how the variable was named or whether it spans many lines. This
-// is what the heuristic scan can't do: find a prompt the regex missed and recover
-// its exact text. Used when a key is present and the user hasn't pointed at files.
+// embedded in them — full text, a name, and the whole I/O contract (intent,
+// input, output shape). This is what the heuristic scan can't do: find a prompt
+// the regex missed, recover its exact text, and infer what it's for.
 
 export interface DiscoveredPrompt {
   id: string
@@ -15,7 +14,11 @@ export interface DiscoveredPrompt {
   text: string
   intent: string
   role: 'system' | 'user' | 'template' | 'other'
-  outputKind: 'text' | 'structured'
+  inputType: 'text' | 'image' | 'number' | 'boolean' | 'enum' | 'json'
+  inputDescription: string
+  outputKind: 'text' | 'structured' | 'image' | 'video'
+  outputDescription: string
+  jsonSchema?: Record<string, unknown>
   source: 'file' | 'embedded'
 }
 
@@ -25,27 +28,38 @@ const fileSchema = z.object({
       id: z.string(),
       intent: z.string(),
       role: z.enum(['system', 'user', 'template', 'other']),
-      outputKind: z.enum(['text', 'structured']),
+      inputType: z.enum(['text', 'image', 'number', 'boolean', 'enum', 'json']),
+      inputDescription: z.string(),
+      outputKind: z.enum(['text', 'structured', 'image', 'video']),
+      outputDescription: z.string(),
+      // JSON Schema as a string when outputKind is structured, else empty.
+      jsonSchema: z.string(),
       text: z.string(),
     }),
   ),
 })
 
-const SYSTEM = `You extract the AI prompts embedded in a source file.
+const SYSTEM = `You extract the AI prompts embedded in a source file and describe each one's I/O contract.
 
 A prompt is instruction text written to be sent to a language model — a system
-prompt, or a user-message template. Return its EXACT text as written in the file:
-keep \${...} / {{...}} placeholders, resolve trivial string concatenation, and
-drop the surrounding code. Ignore logs, error strings, UI copy, and SQL.
+prompt, or a user-message template. Return its EXACT text as written: keep
+\${...} / {{...}} placeholders, resolve trivial string concatenation, drop the
+surrounding code. Ignore logs, error strings, UI copy, SQL, and short tool or
+parameter descriptions.
 
-Only return substantial prompts — system prompts and real user-message templates.
-Ignore short tool/parameter descriptions, field labels, and one-line strings that
-are part of a schema rather than an instruction to the model.
+For each prompt provide:
+- id: short kebab-case from its purpose (e.g. "pr-reviewer").
+- intent: one plain sentence on what it is for.
+- role: system | user | template | other.
+- inputType: the type of the user input it expects (text | image | number | boolean | enum | json).
+- inputDescription: one line on what that input is.
+- outputKind: structured (asks for JSON / a fixed shape) | text | image | video.
+- outputDescription: one line on what it produces.
+- jsonSchema: when outputKind is structured, a JSON Schema STRING
+  ({"type":"object","properties":{...},"required":[...]}); otherwise an empty string.
 
-For each prompt give: id (short kebab-case from its purpose), intent (one plain
-sentence), role (system | user | template | other), and outputKind ("structured"
-if it asks for JSON or a fixed shape, else "text"). If the file has no prompts,
-return an empty list.`
+Only return substantial prompts (system prompts, real user-message templates).
+If the file has none, return an empty list.`
 
 const MAX_FILES = 25
 const MAX_CHARS = 14000
@@ -53,9 +67,41 @@ const MAX_CHARS = 14000
 export async function discoverFromFiles(args: { root: string; modelId: string }): Promise<DiscoveredPrompt[]> {
   const files = findPromptFiles(args.root).slice(0, MAX_FILES)
   const model = resolveModel(args.modelId)
-
   const perFile = await Promise.all(files.map(f => extractOne(model, f)))
-  return dedupe(perFile.flat())
+  const prompts = dedupe(perFile.flat())
+
+  // A structured contract is useless without a schema; if the extraction left it
+  // empty, synthesize it in a focused second pass (it drives the required-keys check).
+  await Promise.all(
+    prompts.map(async p => {
+      if (p.outputKind === 'structured' && schemaIsEmpty(p.jsonSchema)) {
+        p.jsonSchema = await synthesizeSchema(model, p.text, p.outputDescription)
+      }
+    }),
+  )
+  return prompts
+}
+
+function schemaIsEmpty(s?: Record<string, unknown>): boolean {
+  if (!s) return true
+  const props = (s as { properties?: unknown }).properties
+  if (props && typeof props === 'object') return Object.keys(props as Record<string, unknown>).length === 0
+  return Object.keys(s).filter(k => k !== 'type' && k !== 'required').length === 0
+}
+
+async function synthesizeSchema(model: Parameters<typeof generateObject>[0]['model'], promptText: string, outputDescription: string): Promise<Record<string, unknown> | undefined> {
+  try {
+    const { object } = await generateObject({
+      model,
+      temperature: 0,
+      schema: z.object({ schema: z.string() }),
+      system: `Produce a JSON Schema (as a JSON string) for a prompt's structured output: {"type":"object","properties":{"<field>":{"type":...}},"required":[...]}. Infer every field the output must contain from the prompt and description. Never return empty properties.`,
+      prompt: `OUTPUT: ${outputDescription}\n\nPROMPT:\n${promptText.slice(0, 4000)}`,
+    })
+    return parseSchema(object.schema)
+  } catch {
+    return undefined
+  }
 }
 
 async function extractOne(model: Parameters<typeof generateObject>[0]['model'], file: PromptFile): Promise<DiscoveredPrompt[]> {
@@ -70,9 +116,31 @@ async function extractOne(model: Parameters<typeof generateObject>[0]['model'], 
     const isFile = /\.(md|txt|prompt)$/i.test(file.rel)
     return object.prompts
       .filter(p => p.role !== 'other' && p.text.trim().length > 0)
-      .map(p => ({ ...p, file: file.rel, source: isFile ? 'file' : 'embedded' }))
+      .map(p => ({
+        id: p.id,
+        file: file.rel,
+        text: p.text,
+        intent: p.intent,
+        role: p.role,
+        inputType: p.inputType,
+        inputDescription: p.inputDescription,
+        outputKind: p.outputKind,
+        outputDescription: p.outputDescription,
+        jsonSchema: parseSchema(p.jsonSchema),
+        source: isFile ? 'file' : 'embedded',
+      }))
   } catch {
     return []
+  }
+}
+
+function parseSchema(s: string): Record<string, unknown> | undefined {
+  if (!s.trim()) return undefined
+  try {
+    const parsed = JSON.parse(s)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -91,13 +159,4 @@ function dedupe(prompts: DiscoveredPrompt[]): DiscoveredPrompt[] {
     out.push({ ...p, id })
   }
   return out
-}
-
-export function hasAnyKey(): boolean {
-  return Boolean(
-    process.env.GOOGLE_API_KEY ||
-    process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
-    process.env.OPENAI_API_KEY ||
-    process.env.ANTHROPIC_API_KEY,
-  )
 }
