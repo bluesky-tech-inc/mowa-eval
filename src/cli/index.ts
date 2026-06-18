@@ -9,7 +9,7 @@ import { loadDotenv, writeEnvVar, ensureGitignored } from '../config/env'
 import { makeRunner, hasAnyKey, PROVIDERS } from '../providers/index'
 import { makeJudge, makeReviewer } from '../judges/index'
 import { generateTests } from '../generators/index'
-import { readFileAtRef, repoRelative } from '../git/refs'
+import { readFileAtRef, repoRelative, changedFiles } from '../git/refs'
 import { printReport, type PromptReport } from '../report/tty'
 import { spin } from '../report/spinner'
 import { INIT_CONFIG, INIT_PROMPT, INIT_TESTS } from './scaffold'
@@ -86,7 +86,7 @@ async function main() {
     case 'scan': return cmdScan(flags)
     case 'init': return cmdInit(flags)
     case 'generate': return cmdGenerate(configPath, positional[0])
-    case 'eval': return cmdEval(configPath, positional[0], flags.base)
+    case 'eval': return cmdEval(configPath, positional[0], flags.base, flags.all === 'true')
     default:
       console.error(`Unknown command "${command}".\n`)
       cmdHelp()
@@ -138,7 +138,8 @@ ${b('Commands')}
 
 ${b('Options')}
   --config <path>   Config file (default: mowa.eval.yml)
-  --base <ref>      eval: compare against a git ref to catch regressions
+  --base <ref>      eval: compare against a git ref; scores only changed prompts
+  --all             eval: score every prompt even with --base (not just changed)
   --model <id>      Model for discovery/generation (default: google:gemini-2.5-flash)
   --no-ai           scan/init: heuristic only, no model calls
   --sample          init: start from a blank example instead of your prompts
@@ -239,11 +240,25 @@ async function cmdGenerate(configPath: string, id?: string) {
   }
 }
 
-async function cmdEval(configPath: string, id?: string, base?: string) {
+async function cmdEval(configPath: string, id: string | undefined, base: string | undefined, all: boolean) {
   const loaded = loadConfig(configPath)
   const reports: PromptReport[] = []
 
-  for (const p of pick(loaded, id)) {
+  // On a PR (base set) score only the prompts whose files actually changed —
+  // no id needed, the diff decides. --all forces the whole suite.
+  let targets = pick(loaded, id)
+  if (base && !id && !all) {
+    const changed = new Set(changedFiles(base))
+    const scoped = targets.filter(p => changed.has(repoRelative(resolve(loaded.dir, p.file))))
+    if (!scoped.length) {
+      console.log(pc.dim(`No prompt files changed vs ${base} — nothing to score.`))
+      process.exit(0)
+    }
+    if (scoped.length < targets.length) console.log(pc.dim(`Scoring ${scoped.length} changed prompt(s) (use --all for the full suite).`))
+    targets = scoped
+  }
+
+  for (const p of targets) {
     const content = readPromptContent(loaded, p)
     const tests = readTests(loaded, p)
     if (!tests.length) {
