@@ -133,7 +133,7 @@ ${b('Commands')}
   setup <p> <key> Save an API key to .env (provider: google | openai | anthropic)
   scan            Find the prompts in this repo (AI-reviewed when a key is set)
   init            Scaffold mowa.eval.yml from the prompts it finds
-  generate [id]   Write test cases for a prompt (or all of them)
+  generate [id]   Write test cases for a prompt (id = name in mowa.eval.yml; omit for all)
   eval [id]       Score prompts; exits non-zero on regression or below threshold
 
 ${b('Options')}
@@ -201,9 +201,13 @@ async function cmdInit(flags: Record<string, string>) {
     // Embedded prompts get lifted into a file so they can be versioned and graded.
     if (c.source === 'embedded') write(`prompts/${c.id}.md`, c.text.trim() + '\n')
   }
+  console.log(pc.dim(`\nPrompts: ${top.map(c => c.id).join(', ')}`))
   console.log(pc.green('\nReady.'), 'Review mowa.eval.yml, then:')
-  console.log(pc.dim('  mowa generate   # write test cases for each prompt'))
-  console.log(pc.dim('  mowa eval       # score them'))
+  console.log(pc.dim('  mowa generate [id]   # test cases — omit id for all; id is the name in mowa.eval.yml'))
+  console.log(pc.dim('  mowa eval            # score them'))
+  console.log(pc.dim('\nCommit mowa.eval.yml, prompts/, and tests/ — git history is how regressions are caught.'))
+  const embedded = top.filter(c => c.source === 'embedded').length
+  if (embedded) console.log(pc.dim(`Note: ${embedded} prompt(s) were copied out of your source into prompts/. Keep them in sync, or import them back from the .md.`))
 }
 
 function configEntry(c: Found) {
