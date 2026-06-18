@@ -5,6 +5,7 @@ import pc from 'picocolors'
 import { scorePrompt, type TestCase, type RbcSpec, type PromptResult } from '../core/index'
 import { loadConfig, readPromptContent, readTests, type LoadedConfig } from '../config/load'
 import { evalConfig, type PromptConfig } from '../config/schema'
+import { loadDotenv, writeEnvVar, ensureGitignored } from '../config/env'
 import { makeRunner, hasAnyKey, PROVIDERS } from '../providers/index'
 import { makeJudge, makeReviewer } from '../judges/index'
 import { generateTests } from '../generators/index'
@@ -64,14 +65,15 @@ async function discover(flags: Record<string, string>): Promise<{ items: Found[]
 function ensureKeyOrExit(flags: Record<string, string>) {
   if (flags['no-ai'] === 'true' || hasAnyKey()) return
   console.log(`mowa needs an AI key — it reads your prompts to name them and infer their contracts.\n`)
-  console.log('Set one of these, then run again:')
-  for (const p of PROVIDERS) console.log(`  ${pc.bold(p.env.padEnd(22))} ${pc.dim(`# ${p.name} · ${p.model}`)}`)
-  console.log(pc.dim(`\n  export ${PROVIDERS[0]!.env}=...\n`))
+  console.log('Save one with `mowa setup`, then run again:')
+  for (const p of PROVIDERS) console.log(`  ${pc.bold(('mowa setup ' + p.env.split('_')[0]!.toLowerCase()).padEnd(22))} ${pc.dim(`<key>   # ${p.name}`)}`)
+  console.log(pc.dim(`\n(or export ${PROVIDERS[0]!.env}=... for this session)`))
   console.log(pc.dim('Advanced: `--no-ai` does a rough heuristic pass with no key (contracts come out blank).'))
   process.exit(1)
 }
 
 async function main() {
+  loadDotenv()
   const [command, ...rest] = process.argv.slice(2)
   const { positional, flags } = parseArgs(rest)
   const configPath = flags.config ?? 'mowa.eval.yml'
@@ -79,6 +81,7 @@ async function main() {
   if (!command || command === 'help' || command === '--help' || command === '-h' || flags.help === 'true' || flags.h === 'true') return cmdHelp()
 
   switch (command) {
+    case 'setup': return cmdSetup(positional, flags)
     case 'scan': return cmdScan(flags)
     case 'init': return cmdInit(flags)
     case 'generate': return cmdGenerate(configPath, positional[0])
@@ -90,6 +93,34 @@ async function main() {
   }
 }
 
+function cmdSetup(positional: string[], flags: Record<string, string>) {
+  let env: string | undefined
+  let key: string | undefined
+  for (const p of PROVIDERS) {
+    const short = p.env.split('_')[0]!.toLowerCase() // google | openai | anthropic
+    if (flags[short]) { env = p.env; key = flags[short] }
+  }
+  if (!env && positional[0]) {
+    const q = positional[0].toLowerCase()
+    const prov = PROVIDERS.find(p => p.name.toLowerCase().includes(q) || p.env.toLowerCase().startsWith(q))
+    if (prov) { env = prov.env; key = positional[1] }
+  }
+
+  if (!env || !key) {
+    console.log('Save an API key to .env so mowa uses it on every run.\n')
+    console.log(`${pc.bold('Usage')}`)
+    console.log('  mowa setup <provider> <api-key>     e.g. mowa setup google AIza...')
+    console.log('  mowa setup --openai sk-...')
+    console.log(`\nProviders: ${PROVIDERS.map(p => p.env.split('_')[0]!.toLowerCase()).join(' · ')}`)
+    process.exit(2)
+  }
+
+  writeEnvVar(env, key)
+  ensureGitignored('.env')
+  console.log(pc.green(`✓ saved ${env} to .env`) + pc.dim('  (.env is gitignored)'))
+  console.log(pc.dim('Try it: mowa scan'))
+}
+
 function cmdHelp() {
   const b = pc.bold
   console.log(`${b('mowa')} — a test runner for prompts. Score them, and fail the PR when one regresses.
@@ -98,6 +129,7 @@ ${b('Usage')}
   mowa <command> [options]
 
 ${b('Commands')}
+  setup <p> <key> Save an API key to .env (provider: google | openai | anthropic)
   scan            Find the prompts in this repo (AI-reviewed when a key is set)
   init            Scaffold mowa.eval.yml from the prompts it finds
   generate [id]   Write test cases for a prompt (or all of them)

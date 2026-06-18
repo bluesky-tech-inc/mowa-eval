@@ -14,10 +14,10 @@ history, your CI is the compute, your API key calls the model.
 ## Quick start
 
 ```bash
-export GOOGLE_API_KEY=...   # bring your own key
-npx mowa-eval init          # finds the prompts already in your repo and scaffolds a config
-npx mowa-eval generate      # writes test cases for each
-npx mowa-eval eval          # run + see the score
+npx mowa-eval setup google <api-key>   # save a key to .env (gitignored)
+npx mowa-eval init                     # find the prompts in your repo, scaffold a config
+npx mowa-eval generate                 # write test cases for each
+npx mowa-eval eval                     # run + see the score
 ```
 
 You don't have to point it at anything. `init` reads your codebase with an **AI
