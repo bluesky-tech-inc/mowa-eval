@@ -21,17 +21,21 @@ npm i -g mowa-eval             # or install the `mowa` binary globally
 ## Quick start
 
 ```bash
-mowa setup google <api-key>   # save a key to .env (gitignored)
-mowa init                     # find your prompts, scaffold mowa.eval.yml
-mowa generate                 # write test cases for each prompt
-mowa eval                     # score them
+mowa setup google <api-key>          # save a key to .env (gitignored)
+mowa init                            # starter mowa.eval.yml + a sample prompt
+mowa add prompts/your-prompt.md      # point it at your own prompt(s)
+mowa generate                        # write test cases for each
+mowa eval                            # score them
 ```
 
-You don't point it at anything. `init` reads your codebase with an **AI agent**: it
-finds the prompts (standalone files *and* ones embedded in source), names them, and
-infers each one's full contract — intent, input, and output shape — into
-`mowa.eval.yml`. Prompts embedded in code are copied into `prompts/<id>.md` so they
-can be versioned and graded.
+You point mowa at your prompts. `init` lays down a starter `mowa.eval.yml` with a
+working sample; `mowa add <file>` registers one of your prompt files, and you fill
+in its contract (intent, input, output shape). Each prompt is just a file mowa
+reads and grades.
+
+> Want mowa to **find prompts across your whole codebase**, infer their contracts
+> for you, track score history, and let your team manage them in a UI? That's
+> [**mowa.dev**](https://mowa.dev) — this CLI is the open, BYOK test+eval engine.
 
 ## Commands
 
@@ -43,14 +47,17 @@ mowa setup google AIza...        # provider: google | openai | anthropic
 mowa setup --openai sk-...        # flag form
 ```
 
-### `mowa scan`
-Preview the prompts in the repo without writing anything. With a key, an AI agent
-reads the candidate files and reports each prompt's name and intent.
-
 ### `mowa init`
-Scaffold `mowa.eval.yml` from the discovered prompts (and lift embedded prompts
-into `prompts/*.md`). Prints the ids it created. Refuses to clobber an existing
-config unless you pass `--force`.
+Create a starter `mowa.eval.yml` plus a working sample prompt and tests. `--force`
+resets it to the sample.
+
+### `mowa add <file> [--id <id>]`
+Register one of your prompt files in `mowa.eval.yml` with a blank contract for you
+to fill in. The id defaults to the filename.
+```bash
+mowa add prompts/support.md
+mowa add src/prompts/agent.txt --id agent
+```
 
 ### `mowa list` (alias `ls`)
 List the prompts and ids in `mowa.eval.yml` — offline, no key, no model calls.
@@ -84,17 +91,18 @@ mowa eval --base main --all     # regression across every prompt
 | Flag | Commands | Meaning |
 |---|---|---|
 | `--config <path>` | all | Config file (default `mowa.eval.yml`) |
-| `--model <id>` | scan, init, generate | Model for discovery/generation (default `google:gemini-2.5-flash`) |
+| `--id <id>` | add | Id for the prompt (default: derived from the filename) |
 | `--base <ref>` | eval | Compare to a git ref for regression; scores only the prompts whose files changed |
 | `--all` | eval | With `--base`, score every prompt, not just changed ones |
-| `--force` | init | Overwrite an existing `mowa.eval.yml` (and lifted prompt copies) |
-| `--no-ai` | scan, init | Heuristic only — no key, no model calls (contracts come out blank) |
-| `--sample` | init | Start from a blank example instead of your prompts |
+| `--force` | init | Reset to the sample, overwriting `mowa.eval.yml` |
 | `--help`, `-h` | — | Show help |
+
+Set the model per prompt (or in `defaults`) inside `mowa.eval.yml`, e.g.
+`reference_model: openai:gpt-4o`.
 
 ## Providers & keys
 
-Set one key (bring your own — used to find prompts, generate tests, and judge):
+Set one key (bring your own — used to generate tests and judge outputs):
 
 | Env var | Provider | Example model |
 |---|---|---|
@@ -102,7 +110,7 @@ Set one key (bring your own — used to find prompts, generate tests, and judge)
 | `OPENAI_API_KEY` | OpenAI | `openai:gpt-4o` |
 | `ANTHROPIC_API_KEY` | Anthropic | `anthropic:claude-sonnet-4-5` |
 
-Pick a model with `--model <provider:model>`. A real env var always wins over `.env`.
+Set the model in `mowa.eval.yml` (`reference_model` / `judge`). A real env var always wins over `.env`.
 
 ## `mowa.eval.yml`
 
@@ -178,7 +186,7 @@ check if a score dropped past `max_regression` or fell below `min`. It's the sam
 - **PR gate** — block prompt regressions before merge.
 - **Local loop** — `mowa eval recipe` while you iterate.
 - **Open a PR** — a prompt change (from anyone) gets scored automatically; reviewers see the number.
-- **Model migration** — `--model openai:gpt-4o` to compare candidates before switching.
+- **Model migration** — switch `reference_model` in `mowa.eval.yml` and compare scores before shipping.
 - **Audit** — `mowa eval` scores every prompt; find your weakest.
 - **Incident → regression test** — add the bad input to `tests/`, and it's guarded forever.
 

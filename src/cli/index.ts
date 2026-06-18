@@ -1,77 +1,20 @@
-import { writeFileSync, existsSync, mkdirSync } from 'node:fs'
-import { resolve, dirname } from 'node:path'
-import { parse } from 'yaml'
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs'
+import { resolve, dirname, basename, extname } from 'node:path'
+import { parse, stringify } from 'yaml'
 import pc from 'picocolors'
 import { scorePrompt, type TestCase, type RbcSpec, type PromptResult } from '../core/index'
 import { loadConfig, readPromptContent, readTests, type LoadedConfig } from '../config/load'
 import { evalConfig, type PromptConfig } from '../config/schema'
 import { loadDotenv, writeEnvVar, ensureGitignored } from '../config/env'
-import { makeRunner, hasAnyKey, PROVIDERS } from '../providers/index'
+import { makeRunner, PROVIDERS } from '../providers/index'
 import { makeJudge, makeReviewer } from '../judges/index'
 import { generateTests } from '../generators/index'
 import { readFileAtRef, repoRelative, changedFiles } from '../git/refs'
 import { printReport, type PromptReport } from '../report/tty'
 import { spin } from '../report/spinner'
 import { INIT_CONFIG, INIT_PROMPT, INIT_TESTS } from './scaffold'
-import { scanRepo } from '../discover/scan'
-import { discoverFromFiles } from '../discover/agent'
-import { stringify } from 'yaml'
 
 const DEFAULT_MODEL = 'google:gemini-2.5-flash'
-
-interface Found {
-  id: string
-  file: string
-  source: 'file' | 'embedded'
-  text: string
-  intent: string
-  inputType: string
-  inputDescription: string
-  outputKind: 'text' | 'structured' | 'image' | 'video'
-  outputDescription: string
-  jsonSchema?: Record<string, unknown>
-  confidence: number
-}
-
-// Heuristic scan gathers candidates; an AI agent then confirms and names them
-// when a key is present and the user hasn't opted out with --no-ai.
-async function discover(flags: Record<string, string>, onProgress?: (done: number, total: number) => void): Promise<{ items: Found[]; usedAI: boolean }> {
-  const candidates = scanRepo(process.cwd())
-  if (!candidates.length) return { items: [], usedAI: false }
-
-  if (flags['no-ai'] === 'true') {
-    // Explicit heuristic pass — fast, no key, but contracts come out empty.
-    return {
-      items: candidates.map(c => ({ id: c.id, file: c.file, source: c.source, text: c.text, intent: '', inputType: 'text', inputDescription: '', outputKind: c.outputKind, outputDescription: '', confidence: c.confidence })),
-      usedAI: false,
-    }
-  }
-
-  // AI path: read prompt-bearing files in full and extract the embedded prompts
-  // with their whole contract.
-  const refined = await discoverFromFiles({ root: process.cwd(), modelId: flags.model ?? DEFAULT_MODEL, onProgress })
-  return {
-    items: refined.map(r => ({
-      id: r.id, file: r.file, source: r.source, text: r.text, intent: r.intent,
-      inputType: r.inputType, inputDescription: r.inputDescription,
-      outputKind: r.outputKind, outputDescription: r.outputDescription, jsonSchema: r.jsonSchema,
-      confidence: 0.9,
-    })),
-    usedAI: true,
-  }
-}
-
-// mowa is useless without a model — without one it can't name prompts or infer
-// contracts, so refuse rather than dump empty entries. --no-ai is the escape hatch.
-function ensureKeyOrExit(flags: Record<string, string>) {
-  if (flags['no-ai'] === 'true' || hasAnyKey()) return
-  console.log(`mowa needs an AI key — it reads your prompts to name them and infer their contracts.\n`)
-  console.log('Save one with `mowa setup`, then run again:')
-  for (const p of PROVIDERS) console.log(`  ${pc.bold(('mowa setup ' + p.env.split('_')[0]!.toLowerCase()).padEnd(22))} ${pc.dim(`<key>   # ${p.name}`)}`)
-  console.log(pc.dim(`\n(or export ${PROVIDERS[0]!.env}=... for this session)`))
-  console.log(pc.dim('Advanced: `--no-ai` does a rough heuristic pass with no key (contracts come out blank).'))
-  process.exit(1)
-}
 
 async function main() {
   loadDotenv()
@@ -83,9 +26,9 @@ async function main() {
 
   switch (command) {
     case 'setup': return cmdSetup(positional, flags)
-    case 'list': case 'ls': return cmdList(configPath)
-    case 'scan': return cmdScan(flags)
     case 'init': return cmdInit(flags)
+    case 'add': return cmdAdd(positional, flags)
+    case 'list': case 'ls': return cmdList(configPath)
     case 'generate': return cmdGenerate(configPath, positional[0])
     case 'eval': return cmdEval(configPath, positional[0], flags.base, flags.all === 'true')
     default:
@@ -120,14 +63,69 @@ function cmdSetup(positional: string[], flags: Record<string, string>) {
   writeEnvVar(env, key)
   ensureGitignored('.env')
   console.log(pc.green(`✓ saved ${env} to .env`) + pc.dim('  (.env is gitignored)'))
-  console.log(pc.dim('Try it: mowa scan'))
+  console.log(pc.dim('Next: mowa init'))
+}
+
+// Create a starter config + a working sample prompt. The user points it at their
+// own prompts by editing mowa.eval.yml or with `mowa add`. (Auto-discovering
+// prompts across a codebase and inferring contracts is a mowa.dev feature.)
+function cmdInit(flags: Record<string, string>) {
+  const force = flags.force === 'true'
+  if (existsSync(resolve('mowa.eval.yml')) && !force) {
+    console.log(pc.yellow('mowa.eval.yml already exists.'), 'Add a prompt with', pc.bold('mowa add <file>'), 'or edit it directly (--force to reset to the sample).')
+    return
+  }
+  write('mowa.eval.yml', INIT_CONFIG, true)
+  write('prompts/recipe.md', INIT_PROMPT, force)
+  write('tests/recipe.jsonl', INIT_TESTS, force)
+  console.log(pc.green('\nReady.'), 'A sample prompt is wired up. Point mowa at your own prompts:')
+  console.log(pc.dim('  • mowa add path/to/your-prompt.md     — register a prompt file'))
+  console.log(pc.dim('  • or edit mowa.eval.yml — set `file:` and fill each contract'))
+  console.log(pc.dim('Then: mowa generate && mowa eval'))
+  console.log(pc.dim('\nWant mowa to find prompts across your codebase and write the contracts for you? → mowa.dev'))
+}
+
+// Point mowa at an existing prompt file. The contract starts blank — you fill it
+// in (intent, input, output). No scanning, no inference.
+function cmdAdd(positional: string[], flags: Record<string, string>) {
+  const file = positional[0]
+  if (!file) {
+    console.log('Usage: mowa add <path-to-prompt-file> [--id <id>]')
+    process.exit(2)
+  }
+  if (!existsSync(resolve(file))) {
+    console.error(pc.red(`File not found: ${file}`))
+    process.exit(1)
+  }
+  const configPath = flags.config ?? 'mowa.eval.yml'
+  const config = existsSync(resolve(configPath))
+    ? evalConfig.parse(parse(readFileSync(resolve(configPath), 'utf8')))
+    : { version: 1 as const, standard: '2.0', defaults: { reference_model: DEFAULT_MODEL, judge: DEFAULT_MODEL, samples_per_case: 1 }, plugins: [], prompts: [] }
+
+  const id = flags.id ?? slug(basename(file, extname(file)))
+  if (config.prompts.some(p => p.id === id)) {
+    console.error(pc.red(`A prompt "${id}" already exists in ${configPath}. Pass --id to choose another.`))
+    process.exit(1)
+  }
+
+  config.prompts.push({
+    id,
+    file,
+    tests: `tests/${id}.jsonl`,
+    contract: { intent: '', input: { type: 'text', description: '' }, output: { kind: 'text', description: '' } },
+    checks: [],
+    threshold: { min: 70, max_regression: 8 },
+  })
+  writeFileSync(resolve(configPath), stringify(config))
+  console.log(pc.green(`✓ added ${id}`), pc.dim(`→ ${configPath}`))
+  console.log(pc.dim(`Fill in its contract (intent / input / output) in ${configPath}, then \`mowa generate ${id}\`.`))
 }
 
 function cmdList(configPath: string) {
   const loaded = loadConfig(configPath)
   const prompts = loaded.config.prompts
   if (!prompts.length) {
-    console.log(`No prompts in ${configPath}. Run \`mowa init\`.`)
+    console.log(`No prompts in ${configPath}. Run \`mowa init\` or \`mowa add <file>\`.`)
     return
   }
   console.log(`${pc.bold(String(prompts.length))} prompt${prompts.length === 1 ? '' : 's'} in ${configPath}:\n`)
@@ -148,108 +146,30 @@ ${b('Usage')}
 
 ${b('Commands')}
   setup <p> <key> Save an API key to .env (provider: google | openai | anthropic)
-  scan            Find the prompts in this repo (AI-reviewed when a key is set)
-  init            Scaffold mowa.eval.yml from the prompts it finds
+  init            Create a starter mowa.eval.yml + a sample prompt
+  add <file>      Register one of your prompt files (you fill in its contract)
   list            List the prompts (and ids) in mowa.eval.yml — offline, no key
   generate [id]   Write test cases for a prompt (id = name in mowa.eval.yml; omit for all)
   eval [id]       Score prompts; exits non-zero on regression or below threshold
 
 ${b('Options')}
   --config <path>   Config file (default: mowa.eval.yml)
+  --id <id>         add: id for the prompt (default: derived from the filename)
   --base <ref>      eval: compare against a git ref; scores only changed prompts
   --all             eval: score every prompt even with --base (not just changed)
-  --model <id>      Model for discovery/generation (default: google:gemini-2.5-flash)
-  --no-ai           scan/init: heuristic only, no model calls
-  --sample          init: start from a blank example instead of your prompts
-  --force           init: overwrite an existing mowa.eval.yml (and prompt copies)
+  --force           init: reset to the sample, overwriting mowa.eval.yml
 
-${b('Providers')} ${pc.dim('(set one key — used to find prompts, generate tests, and judge)')}
+${b('Providers')} ${pc.dim('(set one key — used to generate tests and judge outputs)')}
 ${PROVIDERS.map(p => `  ${p.env.padEnd(24)}${pc.dim(`${p.name} · ${p.model}`)}`).join('\n')}
-  ${pc.dim('pick a model with --model <provider:model>; default is ' + DEFAULT_MODEL)}
+  ${pc.dim('set the model per prompt in mowa.eval.yml; default is ' + DEFAULT_MODEL)}
 
 ${b('Quickstart')}
-  export GOOGLE_API_KEY=...
-  mowa init && mowa generate && mowa eval
+  mowa setup google <key>
+  mowa init                  # or: mowa add prompts/your-prompt.md
+  mowa generate && mowa eval
 
+Find prompts across your codebase and manage them with a team → mowa.dev
 Docs: https://github.com/bluesky-tech-inc/mowa-eval`)
-}
-
-async function cmdScan(flags: Record<string, string>) {
-  ensureKeyOrExit(flags)
-  const sp = flags['no-ai'] === 'true' ? null : spin('Finding prompts…')
-  const { items, usedAI } = await discover(flags, (d, t) => sp?.update(`Reviewing files with the agent… ${d}/${t}`))
-  sp?.stop()
-  if (!items.length) {
-    console.log('No prompts found. They live in .md/.txt/.prompt files, or in string literals named like a prompt (PROMPT, system, …).')
-    return
-  }
-  console.log(`Found ${pc.bold(String(items.length))} prompt${items.length === 1 ? '' : 's'}${usedAI ? pc.dim(' (AI-reviewed)') : ''}:\n`)
-  for (const c of items) {
-    console.log(`  ${pc.bold(c.id)}  ${pc.dim(`${c.file} · ${c.source}`)}`)
-    console.log(pc.dim(`    ${c.intent || c.text.replace(/\s+/g, ' ').trim().slice(0, 90) + '…'}`))
-  }
-  if (!usedAI) console.log(pc.dim('\nSet an API key for AI-reviewed discovery (or pass --no-ai to keep it heuristic).'))
-  console.log(pc.dim('Run `mowa init` to scaffold a config from these.'))
-}
-
-async function cmdInit(flags: Record<string, string>) {
-  if (flags.sample !== 'true') ensureKeyOrExit(flags)
-  const sp = flags.sample === 'true' || flags['no-ai'] === 'true' ? null : spin('Finding prompts…')
-  const { items, usedAI } = flags.sample === 'true'
-    ? { items: [] as Found[], usedAI: false }
-    : await discover(flags, (d, t) => sp?.update(`Reviewing files with the agent… ${d}/${t}`))
-  sp?.stop()
-  if (!items.length) {
-    write('mowa.eval.yml', INIT_CONFIG)
-    write('prompts/recipe.md', INIT_PROMPT)
-    write('tests/recipe.jsonl', INIT_TESTS)
-    console.log(pc.dim('\nNo existing prompts found — scaffolded a sample.'))
-    console.log(pc.green('Ready.'), 'Set GOOGLE_API_KEY, then run', pc.bold('mowa eval'))
-    return
-  }
-
-  const force = flags.force === 'true'
-  if (existsSync(resolve('mowa.eval.yml')) && !force) {
-    console.log(pc.yellow('\nmowa.eval.yml already exists.'), 'Run', pc.bold('mowa init --force'), 'to regenerate it, or', pc.bold('mowa list'), 'to see what\'s there.')
-    return
-  }
-
-  console.log(`Found ${pc.bold(String(items.length))} prompt${items.length === 1 ? '' : 's'}${usedAI ? pc.dim(' (AI-reviewed)') : ''} in your repo.`)
-  const top = items.slice(0, 25)
-  const config = {
-    version: 1,
-    standard: '2.0',
-    defaults: { reference_model: DEFAULT_MODEL, judge: DEFAULT_MODEL },
-    prompts: top.map(configEntry),
-  }
-  write('mowa.eval.yml', stringify(config), true)
-  for (const c of top) {
-    // Embedded prompts get lifted into a file so they can be versioned and graded.
-    if (c.source === 'embedded') write(`prompts/${c.id}.md`, c.text.trim() + '\n', force)
-  }
-  console.log(pc.dim(`\nPrompts: ${top.map(c => c.id).join(', ')}`))
-  console.log(pc.green('\nReady.'), 'Review mowa.eval.yml, then:')
-  console.log(pc.dim('  mowa generate [id]   # test cases — omit id for all; id is the name in mowa.eval.yml'))
-  console.log(pc.dim('  mowa eval            # score them'))
-  console.log(pc.dim('\nCommit mowa.eval.yml, prompts/, and tests/ — git history is how regressions are caught.'))
-  const embedded = top.filter(c => c.source === 'embedded').length
-  if (embedded) console.log(pc.dim(`Note: ${embedded} prompt(s) were copied out of your source into prompts/. Keep them in sync, or import them back from the .md.`))
-}
-
-function configEntry(c: Found) {
-  const output: Record<string, unknown> = { kind: c.outputKind, description: c.outputDescription }
-  if (c.outputKind === 'structured') output.jsonSchema = c.jsonSchema ?? { type: 'object', properties: {} }
-  return {
-    id: c.id,
-    file: c.source === 'embedded' ? `prompts/${c.id}.md` : c.file,
-    tests: `tests/${c.id}.jsonl`,
-    contract: {
-      intent: c.intent,
-      input: { type: c.inputType || 'text', description: c.inputDescription },
-      output,
-    },
-    threshold: { min: 70, max_regression: 8 },
-  }
 }
 
 async function cmdGenerate(configPath: string, id?: string) {
@@ -365,6 +285,14 @@ const judgeFor = (l: LoadedConfig, p: PromptConfig) => p.judge ?? l.config.defau
 function toRbcSpec(c: { type: string } & Record<string, unknown>): RbcSpec {
   const kind = c.type === 'banned_content' ? 'safety' : 'structural'
   return { id: c.type, label: c.type, kind, ...c } as RbcSpec
+}
+
+function slug(name: string): string {
+  return name
+    .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase() || 'prompt'
 }
 
 function write(rel: string, body: string, force = false) {

@@ -16,10 +16,6 @@ export const PROVIDERS = [
   { name: 'Anthropic', env: 'ANTHROPIC_API_KEY', model: 'anthropic:claude-sonnet-4-5' },
 ] as const
 
-export function hasAnyKey(): boolean {
-  return PROVIDERS.some(p => process.env[p.env]) || Boolean(process.env.GOOGLE_GENERATIVE_AI_API_KEY)
-}
-
 export interface ModelRef {
   provider: string
   model: string
